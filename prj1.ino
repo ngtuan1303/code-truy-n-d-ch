@@ -76,10 +76,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2); // Địa chỉ 0x27, màn 16x2
 // 3. HÀM NGẮT CHỐNG NHIỄU (INTERRUPT SERVICE ROUTINE)
 // ==============================================================================
 
-/**
- * @brief  Ngắt phần cứng khi có giọt rơi qua hồng ngoại.
- * @note   Sử dụng millis() để debounce phần mềm, chống đếm trùng 1 giọt nhiều lần.
- */
+
 void IRAM_ATTR xu_ly_ngat_dem_giot() {
     unsigned long thoi_gian_hien_tai = millis();
     // Bỏ qua các tín hiệu quá gần nhau (nhiễu viền hoặc giọt bị vỡ)
@@ -123,8 +120,7 @@ void setup() {
     // 4. Khởi tạo WiFi
     WiFi.begin(TEN_WIFI, MAT_KHAU_WIFI);
     Serial.print("[WIFI] Dang ket noi");
-    // Không dùng while(WiFi.status() != WL_CONNECTED) để tránh treo hệ thống cứng
-    // Sẽ tự kết nối ngầm nhờ ESP32 core
+    
 }
 
 // ==============================================================================
@@ -292,10 +288,9 @@ void xu_ly_canh_bao() {
     }
 }
 
-// ==============================================================================
+
 // 6. MODULE CHÍNH (MAIN LOOP)
-// ==============================================================================
-// Vòng lặp chính gọn gàng, đóng vai trò như một Task Scheduler (Bộ điều phối tác vụ)
+
 
 void loop() {
     xu_ly_doc_cam_bien();
