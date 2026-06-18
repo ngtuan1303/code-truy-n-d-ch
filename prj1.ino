@@ -6,296 +6,284 @@
 #include <HX711.h>
 
 // ==============================================================================
-// 1. CẤU HÌNH PHẦN CỨNG & HẰNG SỐ (CONFIGURATION & CONSTANTS)
+// 1. CẤU HÌNH PHẦN CỨNG & HẰNG SỐ
 // ==============================================================================
 
-// --- Cấu hình chân (Pins) ---
-const int CHAN_HX711_DT       = 19;
-const int CHAN_HX711_SCK      = 18;
-const int CHAN_CAM_BIEN_GIOT  = 4;
-// I2C mặc định của ESP32: SDA = 21, SCL = 22
+const int CHAN_HX711_DT      = 19;
+const int CHAN_HX711_SCK     = 18;
+const int CHAN_CAM_BIEN_GIOT = 4;
 
-// --- Cấu hình Mạng & Server ---
-const char* TEN_WIFI          = "XMen 2";
-const char* MAT_KHAU_WIFI     = "0915610611";
+const char* TEN_WIFI      = "QA 5G";
+const char* MAT_KHAU_WIFI = "qa27032000";
 
-// Đã tách thành 2 URL riêng biệt theo yêu cầu của Web Server
-const char* URL_REGISTER      = "https://bme-1.vercel.app/api/esp32/register";
-const char* URL_UPDATE        = "https://bme-1.vercel.app/api/esp32/update";
+// Server tự xử lý heartbeat + update trong 1 endpoint duy nhất
+const char* URL_SERVER = "http://192.168.1.6:8000/api/du-lieu-esp";
 
-// --- Cấu hình Chu kỳ chạy (ms) - Kiến trúc Non-blocking ---
-const unsigned long CHU_KY_DOC_LOADCELL = 500;
-const unsigned long CHU_KY_TINH_TOAN    = 1000;
-const unsigned long CHU_KY_CAP_NHAT_LCD = 3000;
-const unsigned long CHU_KY_GUI_SERVER   = 5000;
+// MAC Address của thiết bị này — dùng để server phân biệt nhiều ESP32
+// Thay bằng MAC thực của board (xem Serial Monitor khi chạy setup)
+const char* MAC_ADDRESS = "AA:BB:CC:DD:EE:22";
 
-// --- Cấu hình Ngưỡng (Thresholds) ---
-const unsigned long THOI_GIAN_DEBOUNCE_GIOT = 120;    // Bỏ qua nhiễu < 120ms
-const unsigned long NGUONG_CANH_BAO_MAT_GIOT = 15000; // Cảnh báo nếu 15s không có giọt
-const float HE_SO_HIEU_CHUAN_HX711 = 420.5;          // CẦN THAY ĐỔI THEO THỰC TẾ
+// --- Chu kỳ non-blocking ---
+const unsigned long CHU_KY_DOC_LOADCELL  = 300;   // Đọc loadcell mỗi 300ms
+const unsigned long CHU_KY_TINH_TOAN     = 1000;  // Tính toán mỗi 1 giây
+const unsigned long CHU_KY_CAP_NHAT_LCD  = 1000;  // Cập nhật LCD mỗi 1 giây
+const unsigned long CHU_KY_GUI_SERVER    = 5000;  // Gửi dữ liệu mỗi 5 giây
+
+// --- Ngưỡng ---
+const unsigned long THOI_GIAN_DEBOUNCE_GIOT  = 120;
+const unsigned long NGUONG_CANH_BAO_MAT_GIOT = 15000;
+
+// --- Cấu hình Loadcell ---
+const float HE_SO_HIEU_CHUAN_HX711 = -55.448; // Thay bằng hệ số thực tế của bạn
+
+// Số mẫu lấy trung bình mỗi lần đọc HX711.
+// Tăng lên giảm nhiễu nhưng chậm hơn (5–10 là hợp lý).
+const int SO_MAU_TRUNG_BINH = 8;
+
+// Ngưỡng thay đổi tối thiểu để cập nhật khối lượng.
+// Lọc rung động nhỏ < 1g, tránh LCD nhảy liên tục.
+const float NGUONG_THAY_DOI_GRAM = 1.0;
 
 // ==============================================================================
-// 2. BIẾN TOÀN CỤC (GLOBAL VARIABLES)
+// 2. BIẾN TOÀN CỤC
 // ==============================================================================
 
-// --- Biến Hệ thống & Thời gian (Bộ định thời) ---
+// --- Bộ định thời ---
 unsigned long thoi_gian_doc_loadcell_truoc = 0;
 unsigned long thoi_gian_tinh_toan_truoc    = 0;
 unsigned long thoi_gian_cap_nhat_lcd_truoc = 0;
 unsigned long thoi_gian_gui_server_truoc   = 0;
 
-// --- Biến Dữ liệu Loadcell ---
-float khoi_luong_hien_tai = 0.0;
-float khoi_luong_ban_dau  = 0.0;
-float khoi_luong_con_lai  = 0.0;
-float khoi_luong_truoc_do = 0.0; // Dùng để tính đạo hàm (tốc độ)
+// --- Dữ liệu Loadcell ---
+float khoi_luong_hien_tai  = 0.0;
+float khoi_luong_con_lai   = 0.0;
+float khoi_luong_truoc_do  = 0.0;
 
-// --- Biến Dữ liệu Đếm giọt ---
-// Dùng 'volatile' vì biến này bị thay đổi trong Ngắt (Interrupt)
+// --- Dữ liệu đếm giọt ---
 volatile unsigned long tong_so_giot        = 0;
 volatile unsigned long thoi_gian_giot_cuoi = 0;
-unsigned long tong_so_giot_truoc_do        = 0;
+unsigned long          tong_so_giot_truoc_do = 0;
 
-// --- Biến Tính toán ---
-float toc_do_truyen_g_phut  = 0.0;
-float toc_do_truyen_ml_phut = 0.0; // Giả sử 1g = 1ml đối với dịch truyền chuẩn
-int giot_moi_phut           = 0;
+// --- Tính toán ---
+float toc_do_truyen_ml_phut = 0.0;
+int   giot_moi_phut         = 0;
 
 // --- Trạng thái ---
-uint8_t trang_thai_man_hinh = 0; // 0: Khối lượng, 1: Tốc độ giọt
-bool canh_bao_tac_nghen     = false;
 
-// CỜ TRẠNG THÁI ĐĂNG KÝ SERVER
-bool da_dang_ky_server      = false;
+bool    canh_bao_tac_nghen  = false;
 
-// --- Đối tượng (Objects) ---
-HX711 loadcell;
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Địa chỉ 0x27, màn 16x2
+// --- Đối tượng ---
+HX711             loadcell;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // ==============================================================================
-// 3. HÀM NGẮT CHỐNG NHIỄU (INTERRUPT SERVICE ROUTINE)
+// 3. ISR ĐẾM GIỌT
 // ==============================================================================
-
 
 void IRAM_ATTR xu_ly_ngat_dem_giot() {
-    unsigned long thoi_gian_hien_tai = millis();
-    // Bỏ qua các tín hiệu quá gần nhau (nhiễu viền hoặc giọt bị vỡ)
-    if (thoi_gian_hien_tai - thoi_gian_giot_cuoi > THOI_GIAN_DEBOUNCE_GIOT) {
+    unsigned long t = millis();
+    if (t - thoi_gian_giot_cuoi > THOI_GIAN_DEBOUNCE_GIOT) {
         tong_so_giot++;
-        thoi_gian_giot_cuoi = thoi_gian_hien_tai;
+        thoi_gian_giot_cuoi = t;
     }
 }
 
 // ==============================================================================
-// 4. MODULE: KHỞI TẠO (SETUP)
+// 4. SETUP
 // ==============================================================================
 
 void setup() {
     Serial.begin(115200);
     Serial.println("\n[SYSTEM] Khoi dong He thong Truyen dich Thong minh");
 
-    // 1. Khởi tạo LCD
+    // LCD
     lcd.init();
     lcd.backlight();
-    lcd.setCursor(0, 0);
-    lcd.print("He thong Drip...");
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print("Dang khoi dong..");
 
-    // 2. Khởi tạo Cảm biến Giọt (Ngắt sườn xuống)
+    // Cảm biến giọt
     pinMode(CHAN_CAM_BIEN_GIOT, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(CHAN_CAM_BIEN_GIOT), xu_ly_ngat_dem_giot, FALLING);
 
-    // 3. Khởi tạo Loadcell
+    // Loadcell
     loadcell.begin(CHAN_HX711_DT, CHAN_HX711_SCK);
     loadcell.set_scale(HE_SO_HIEU_CHUAN_HX711);
-    loadcell.tare(); // Reset về 0 khi chưa treo bình dịch
-    
-    // Đọc mẫu ban đầu để lấy khối lượng khởi điểm
-    delay(1000); 
+
+    // Tare: lấy trung bình 20 mẫu để zero chính xác
+    Serial.println("[LOADCELL] Dang tare (lay 20 mau)...");
+    loadcell.tare(20);
+    Serial.println("[LOADCELL] Tare xong.");
+
+    // Đọc khối lượng ban đầu (lấy SO_MAU_TRUNG_BINH mẫu)
     if (loadcell.is_ready()) {
-        khoi_luong_ban_dau = loadcell.get_units(10);
-        khoi_luong_con_lai = khoi_luong_ban_dau;
-        Serial.printf("[LOADCELL] Khoi luong ban dau: %.1f g\n", khoi_luong_ban_dau);
+        khoi_luong_hien_tai = loadcell.get_units(SO_MAU_TRUNG_BINH);
+        if (khoi_luong_hien_tai < 0) khoi_luong_hien_tai = 0;
+        khoi_luong_con_lai  = khoi_luong_hien_tai;
+        khoi_luong_truoc_do = khoi_luong_hien_tai;
+        Serial.printf("[LOADCELL] Khoi luong ban dau: %.1f g\n", khoi_luong_hien_tai);
     }
 
-    // 4. Khởi tạo WiFi
+    // WiFi
     WiFi.begin(TEN_WIFI, MAT_KHAU_WIFI);
     Serial.print("[WIFI] Dang ket noi");
-    
+    unsigned long t_wifi = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t_wifi < 10000) {
+        delay(500); Serial.print(".");
+    }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.print("[WIFI] Ket noi thanh cong! IP: ");
+        Serial.println(WiFi.localIP());
+        // In MAC address thực của board để cập nhật vào MAC_ADDRESS nếu cần
+        Serial.print("[WIFI] MAC Address thuc: ");
+        Serial.println(WiFi.macAddress());
+    } else {
+        Serial.println("[WIFI] Khong ket noi duoc, chay offline.");
+    }
+
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print("He thong san sang");
 }
 
 // ==============================================================================
-// 5. MODULE: XỬ LÝ NGHIỆP VỤ (BUSINESS LOGIC TASKS)
-// ==============================================================================
+// 5. MODULE: ĐỌC CẢM BIẾN
 
 void xu_ly_doc_cam_bien() {
-    unsigned long thoi_gian_hien_tai = millis();
-    if (thoi_gian_hien_tai - thoi_gian_doc_loadcell_truoc >= CHU_KY_DOC_LOADCELL) {
-        thoi_gian_doc_loadcell_truoc = thoi_gian_hien_tai;
+    if (millis() - thoi_gian_doc_loadcell_truoc < CHU_KY_DOC_LOADCELL) return;
+    thoi_gian_doc_loadcell_truoc = millis();
 
-        if (loadcell.is_ready()) {
-            // Đọc trung bình 3 lần để làm mượt dữ liệu
-            khoi_luong_hien_tai = loadcell.get_units(3);
-            
-            // Loại bỏ giá trị âm do nhiễu dao động cơ học
-            if (khoi_luong_hien_tai < 0) khoi_luong_hien_tai = 0;
-            
-            khoi_luong_con_lai = khoi_luong_hien_tai; 
-        } else {
-            Serial.println("[ERROR] Mat ket noi Loadcell HX711!");
-        }
+    if (!loadcell.is_ready()) {
+        Serial.println("[ERROR] Mat ket noi Loadcell HX711!");
+        return;
+    }
+
+    // Lấy trung bình SO_MAU_TRUNG_BINH mẫu phần cứng — giảm nhiễu tốt nhất
+    float gia_tri_doc = loadcell.get_units(SO_MAU_TRUNG_BINH);
+    if (gia_tri_doc < 0) gia_tri_doc = 0;
+
+    // Chỉ cập nhật khi chênh lệch vượt ngưỡng tối thiểu.
+    // Tránh LCD và server nhận giá trị "nhảy" do nhiễu điện/cơ học.
+    if (fabs(gia_tri_doc - khoi_luong_hien_tai) >= NGUONG_THAY_DOI_GRAM) {
+        khoi_luong_hien_tai = gia_tri_doc;
+        khoi_luong_con_lai  = khoi_luong_hien_tai;
     }
 }
+
+// ==============================================================================
+// 6. MODULE: TÍNH TOÁN
+// ==============================================================================
 
 void xu_ly_tinh_toan() {
-    unsigned long thoi_gian_hien_tai = millis();
-    if (thoi_gian_hien_tai - thoi_gian_tinh_toan_truoc >= CHU_KY_TINH_TOAN) {
-        // Delta T bằng giây
-        float delta_t = (thoi_gian_hien_tai - thoi_gian_tinh_toan_truoc) / 1000.0;
-        thoi_gian_tinh_toan_truoc = thoi_gian_hien_tai;
+    if (millis() - thoi_gian_tinh_toan_truoc < CHU_KY_TINH_TOAN) return;
 
-        // 1. Tính số giọt/phút
-        // Vô hiệu hóa ngắt tạm thời khi đọc biến volatile nhiều byte để tránh Data Race
-        noInterrupts();
-        unsigned long giot_hien_tai = tong_so_giot;
-        interrupts();
+    float delta_t_s = (millis() - thoi_gian_tinh_toan_truoc) / 1000.0;
+    thoi_gian_tinh_toan_truoc = millis();
 
-        unsigned long giot_trong_chu_ky = giot_hien_tai - tong_so_giot_truoc_do;
-        giot_moi_phut = (giot_trong_chu_ky / delta_t) * 60;
-        tong_so_giot_truoc_do = giot_hien_tai;
+    // Đọc snapshot biến volatile an toàn (tắt ngắt tạm thời)
+    noInterrupts();
+    unsigned long giot_hien_tai = tong_so_giot;
+    interrupts();
 
-        // 2. Tính tốc độ truyền theo khối lượng (g/phut)
-        float chenh_lech_kl = khoi_luong_truoc_do - khoi_luong_con_lai;
-        if (chenh_lech_kl > 0) { // Đảm bảo chỉ tính khi khối lượng giảm
-            toc_do_truyen_g_phut = (chenh_lech_kl / delta_t) * 60;
-            toc_do_truyen_ml_phut = toc_do_truyen_g_phut; // Giả định D = 1g/ml
-        } else {
-            toc_do_truyen_g_phut = 0;
-            toc_do_truyen_ml_phut = 0;
-        }
-        khoi_luong_truoc_do = khoi_luong_con_lai;
+    // Tính giọt/phút trong chu kỳ 1 giây
+    unsigned long giot_trong_chu_ky = giot_hien_tai - tong_so_giot_truoc_do;
+    giot_moi_phut = (int)((giot_trong_chu_ky / delta_t_s) * 60.0);
+    tong_so_giot_truoc_do = giot_hien_tai;
 
-        // In debug chuyên nghiệp
-        Serial.printf("[SENSOR] KL Con lai: %.1fg | Toc do: %.1fml/m | Tong giot: %lu | %d giot/m\n", 
-                      khoi_luong_con_lai, toc_do_truyen_ml_phut, giot_hien_tai, giot_moi_phut);
+    // Tính tốc độ từ chênh lệch khối lượng
+    float chenh_lech = khoi_luong_truoc_do - khoi_luong_con_lai;
+    if (chenh_lech > 0) {
+        toc_do_truyen_ml_phut = (chenh_lech / delta_t_s) * 60.0;
+    } else {
+        toc_do_truyen_ml_phut = 0;
     }
+    khoi_luong_truoc_do = khoi_luong_con_lai;
+
+    Serial.printf("[SENSOR] KL: %.1fg | Toc do: %.1fml/ph | Tong giot: %lu | %d giot/ph\n",
+                  khoi_luong_con_lai, toc_do_truyen_ml_phut, giot_hien_tai, giot_moi_phut);
 }
+
+// ==============================================================================
+// 7. MODULE: HIỂN THỊ LCD
 
 void xu_ly_hien_thi() {
-    unsigned long thoi_gian_hien_tai = millis();
-    if (thoi_gian_hien_tai - thoi_gian_cap_nhat_lcd_truoc >= CHU_KY_CAP_NHAT_LCD) {
-        thoi_gian_cap_nhat_lcd_truoc = thoi_gian_hien_tai;
+    if (millis() - thoi_gian_cap_nhat_lcd_truoc < CHU_KY_CAP_NHAT_LCD) return;
+    thoi_gian_cap_nhat_lcd_truoc = millis();
 
-        char dong_1[17];
-        char dong_2[17];
+    char dong_1[17];
+    char dong_2[17];
 
-        lcd.clear();
-        
-        // Luân phiên 2 màn hình
-        if (trang_thai_man_hinh == 0) {
-            snprintf(dong_1, sizeof(dong_1), "Con lai: %.1fg", khoi_luong_con_lai);
-            snprintf(dong_2, sizeof(dong_2), "Toc do: %.1fml/p", toc_do_truyen_ml_phut);
-        } else {
-            // Lấy snapshot của giọt để tránh thay đổi trong lúc vẽ LCD
-            noInterrupts();
-            unsigned long giot_hien_thi = tong_so_giot;
-            interrupts();
-            
-            snprintf(dong_1, sizeof(dong_1), "Giot/ph: %d", giot_moi_phut);
-            snprintf(dong_2, sizeof(dong_2), "Tong: %lu", giot_hien_thi);
-        }
+    // Dòng 1: Tốc độ giọt (giọt/phút)
+    snprintf(dong_1, sizeof(dong_1), "Toc do:%4d g/ph", giot_moi_phut);
 
-        lcd.setCursor(0, 0); lcd.print(dong_1);
-        lcd.setCursor(0, 1); lcd.print(dong_2);
+    // Dòng 2: Khối lượng dịch còn lại (gram)
+    snprintf(dong_2, sizeof(dong_2), "Con lai:%6.1fg  ", khoi_luong_con_lai);
 
-        // Đảo trạng thái cho lần sau
-        trang_thai_man_hinh = !trang_thai_man_hinh; 
-    }
+    lcd.setCursor(0, 0); lcd.print(dong_1);
+    lcd.setCursor(0, 1); lcd.print(dong_2);
 }
+
+// ==============================================================================
+// 8. MODULE: GỬI WIFI
+
 
 void xu_ly_wifi() {
-    unsigned long thoi_gian_hien_tai = millis();
-    if (thoi_gian_hien_tai - thoi_gian_gui_server_truoc >= CHU_KY_GUI_SERVER) {
-        thoi_gian_gui_server_truoc = thoi_gian_hien_tai;
+    if (millis() - thoi_gian_gui_server_truoc < CHU_KY_GUI_SERVER) return;
+    thoi_gian_gui_server_truoc = millis();
 
-        if (WiFi.status() == WL_CONNECTED) {
-            HTTPClient http;
-
-            // =================================================================
-            // BƯỚC 1: KIỂM TRA VÀ GỌI API REGISTER NẾU CHƯA ĐĂNG KÝ
-            // =================================================================
-            if (!da_dang_ky_server) {
-                http.begin(URL_REGISTER);
-                http.addHeader("Content-Type", "application/json");
-                
-                // Nếu Server yêu cầu JSON cụ thể để đăng ký, bạn sửa chuỗi này (VD: {"id":"esp32_01"})
-                int ma_phan_hoi = http.POST("{\"message\":\"register_request\"}");
-
-                if (ma_phan_hoi == HTTP_CODE_OK || ma_phan_hoi == 201 || ma_phan_hoi == 200) {
-                    Serial.printf("[WIFI] Register thanh cong! Code: %d\n", ma_phan_hoi);
-                    da_dang_ky_server = true; // Đánh dấu đã đăng ký xong
-                } else {
-                    Serial.printf("[ERROR] Register that bai. Ma loi HTTP: %d\n", ma_phan_hoi);
-                }
-                http.end();
-                return; // Kết thúc chu kỳ này, đợi 5s sau mới bắt đầu gửi API Update
-            }
-
-            // =================================================================
-            // BƯỚC 2: NẾU ĐÃ REGISTER THÀNH CÔNG -> GỌI API UPDATE DỮ LIỆU
-            // =================================================================
-            char payload[150];
-            
-            noInterrupts();
-            unsigned long giot_hien_tai = tong_so_giot;
-            interrupts();
-
-            // Định dạng JSON chuẩn
-            snprintf(payload, sizeof(payload), 
-                "{\"khoi_luong_con_lai\":%.1f, \"toc_do_ml_phut\":%.1f, \"tong_giot\":%lu, \"giot_phut\":%d, \"canh_bao\":%d}",
-                khoi_luong_con_lai, toc_do_truyen_ml_phut, giot_hien_tai, giot_moi_phut, canh_bao_tac_nghen ? 1 : 0);
-
-            http.begin(URL_UPDATE);
-            http.addHeader("Content-Type", "application/json");
-
-            int ma_phan_hoi = http.POST(payload);
-
-            if (ma_phan_hoi > 0) {
-                Serial.printf("[WIFI] Gui UPDATE thanh cong - Code: %d\n", ma_phan_hoi);
-            } else {
-                Serial.printf("[ERROR] Loi gui HTTP POST Update: %s\n", http.errorToString(ma_phan_hoi).c_str());
-            }
-            http.end();
-        } else {
-             Serial.println("[WIFI] Mat ket noi mang!");
-             // Nếu mất mạng và muốn bắt buộc Register lại từ đầu khi có mạng, bỏ comment dòng dưới:
-             // da_dang_ky_server = false; 
-        }
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WIFI] Mat ket noi mang!");
+        return;
     }
+
+    // Đóng gói JSON đúng cấu trúc backend yêu cầu
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+        "{\"mac_address\":\"%s\",\"current_drop_rate\":%.1f,\"current_weight\":%.1f}",
+        MAC_ADDRESS,
+        toc_do_truyen_ml_phut,   // current_drop_rate = giọt/phút
+        khoi_luong_con_lai       // current_weight = khối lượng hiện tại (gồm vỏ)
+    );
+
+    HTTPClient http;
+    http.begin(URL_SERVER);
+    http.addHeader("Content-Type", "application/json");
+
+    int ma = http.POST(payload);
+
+    if (ma > 0) {
+        Serial.printf("[WIFI] Gui thanh cong (HTTP %d) | %s\n", ma, payload);
+    } else {
+        Serial.printf("[WIFI] Loi POST: %s\n", http.errorToString(ma).c_str());
+    }
+
+    http.end();
 }
 
+// ==============================================================================
+// 10. MODULE: CẢNH BÁO
+// ==============================================================================
+
 void xu_ly_canh_bao() {
-    unsigned long thoi_gian_hien_tai = millis();
-    
-    // Nếu quá lâu không có giọt mới cập nhật, coi như tắc nghẽn hoặc hết dịch
-    if (tong_so_giot > 0 && (thoi_gian_hien_tai - thoi_gian_giot_cuoi > NGUONG_CANH_BAO_MAT_GIOT)) {
+    if (tong_so_giot > 0 &&
+        (millis() - thoi_gian_giot_cuoi > NGUONG_CANH_BAO_MAT_GIOT)) {
         if (!canh_bao_tac_nghen) {
             canh_bao_tac_nghen = true;
-            Serial.println("[ALARM] CANH BAO: Khong co giot chay qua! Tac nghen hoac het dich.");
-            // Tại đây có thể kích hoạt còi Buzzers
+            Serial.println("[ALARM] Khong co giot chay qua! Tac nghen hoac het dich.");
         }
     } else {
         canh_bao_tac_nghen = false;
     }
 }
 
-
-// 6. MODULE CHÍNH (MAIN LOOP)
-
+// ==============================================================================
+// 11. LOOP CHÍNH
+// ==============================================================================
 
 void loop() {
-    xu_ly_doc_cam_bien();
-    xu_ly_tinh_toan();
-    xu_ly_hien_thi();
-    xu_ly_wifi();
-    xu_ly_canh_bao();
+    xu_ly_doc_cam_bien();   
+    xu_ly_tinh_toan();      
+    xu_ly_hien_thi();      
+    xu_ly_wifi();           
+    xu_ly_canh_bao();       
 }
