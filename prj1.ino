@@ -1,6 +1,8 @@
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h> // Thêm thư viện này để chạy được HTTPS
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <HX711.h>
@@ -13,15 +15,16 @@ const int CHAN_HX711_DT      = 19;
 const int CHAN_HX711_SCK     = 18;
 const int CHAN_CAM_BIEN_GIOT = 4;
 
-const char* TEN_WIFI      = "QA 5G";
-const char* MAT_KHAU_WIFI = "qa27032000";
+const char* TEN_WIFI      = "XMen 2";
+const char* MAT_KHAU_WIFI = "0915610611";
 
 // Server tự xử lý heartbeat + update trong 1 endpoint duy nhất
-const char* URL_SERVER = "http://192.168.1.6:8000/api/du-lieu-esp";
+// Đã sửa thành URL https của Render
+const char* URL_SERVER = "https://bmed1-1.onrender.com/api/du-lieu-esp";
 
 // MAC Address của thiết bị này — dùng để server phân biệt nhiều ESP32
 // Thay bằng MAC thực của board (xem Serial Monitor khi chạy setup)
-const char* MAC_ADDRESS = "AA:BB:CC:DD:EE:22";
+const char* MAC_ADDRESS = "70:4B:CA:30:E8:F8";
 
 // --- Chu kỳ non-blocking ---
 const unsigned long CHU_KY_DOC_LOADCELL  = 300;   // Đọc loadcell mỗi 300ms
@@ -34,7 +37,7 @@ const unsigned long THOI_GIAN_DEBOUNCE_GIOT  = 120;
 const unsigned long NGUONG_CANH_BAO_MAT_GIOT = 15000;
 
 // --- Cấu hình Loadcell ---
-const float HE_SO_HIEU_CHUAN_HX711 = -55.448; // Thay bằng hệ số thực tế của bạn
+const float HE_SO_HIEU_CHUAN_HX711 = 70.65; // Thay bằng hệ số thực tế của bạn
 
 // Số mẫu lấy trung bình mỗi lần đọc HX711.
 // Tăng lên giảm nhiễu nhưng chậm hơn (5–10 là hợp lý).
@@ -224,7 +227,7 @@ void xu_ly_hien_thi() {
 }
 
 // ==============================================================================
-// 8. MODULE: GỬI WIFI
+// 8. MODULE: GỬI WIFI (Đã sửa theo yêu cầu HTTPS và JSON)
 
 
 void xu_ly_wifi() {
@@ -241,12 +244,16 @@ void xu_ly_wifi() {
     snprintf(payload, sizeof(payload),
         "{\"mac_address\":\"%s\",\"current_drop_rate\":%.1f,\"current_weight\":%.1f}",
         MAC_ADDRESS,
-        toc_do_truyen_ml_phut,   // current_drop_rate = giọt/phút
-        khoi_luong_con_lai       // current_weight = khối lượng hiện tại (gồm vỏ)
+        toc_do_truyen_ml_phut,   // current_drop_rate = toc_do_ml_phut
+        khoi_luong_con_lai       // current_weight = khoi_luong_con_lai
     );
 
+    // Khởi tạo HTTPS client
+    WiFiClientSecure client;
+    client.setInsecure(); // Bỏ qua xác minh chứng chỉ SSL
+
     HTTPClient http;
-    http.begin(URL_SERVER);
+    http.begin(client, URL_SERVER);
     http.addHeader("Content-Type", "application/json");
 
     int ma = http.POST(payload);
@@ -284,6 +291,6 @@ void loop() {
     xu_ly_doc_cam_bien();   
     xu_ly_tinh_toan();      
     xu_ly_hien_thi();      
-    xu_ly_wifi();           
+    xu_ly_wifi();          
     xu_ly_canh_bao();       
 }
